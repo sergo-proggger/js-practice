@@ -181,6 +181,20 @@
     }
     html += '</section>';
 
+    if (COURSE.goal) {
+      const g = COURSE.goal;
+      const [y, m, d] = g.examStart.split('-').map(Number);
+      const today0 = new Date();
+      today0.setHours(0, 0, 0, 0);
+      const left = Math.round((new Date(y, m - 1, d) - today0) / 86400000);
+      const leftText = left > 0
+        ? 'До начала экзамена ' + left + ' ' + plural(left, 'день', 'дня', 'дней') + '.'
+        : left === 0 ? 'Экзамен начинается сегодня.' : 'Отбор уже идёт или закончился.';
+      html += '<section class="goal"><h2>' + esc(g.title) + '</h2><p>' + inline(g.text) + '</p>' +
+        '<p class="goal-left">' + leftText + '</p><p class="muted small">' + inline(g.daily) + '</p>' +
+        '<a href="' + g.url + '" target="_blank" rel="noopener">Страница стажировки ↗</a></section>';
+    }
+
     for (const m of COURSE.modules) {
       if (m.lessons) {
         html += '<section class="module"><div class="module-head"><h2>' + esc(m.title) + '</h2><span class="muted">' + esc(m.period) + '</span></div><ol class="row-list">';
