@@ -69,8 +69,21 @@ function jspErrorText(err) {
   return String(err);
 }
 
-// Запускает код ученика и все тесты задачи. Возвращает { status, results?, message?, logs }.
-function jspRun(code, fnName, tests) {
+// Ждёт промис, но не дольше limit мс: функция ученика может забыть вызвать resolve.
+function jspAwait(value, limit) {
+  if (!value || typeof value.then !== 'function') return Promise.resolve({ value: value });
+  return new Promise(function (resolve) {
+    var t = setTimeout(function () { resolve({ stuck: true }); }, limit);
+    value.then(
+      function (v) { clearTimeout(t); resolve({ value: v }); },
+      function (e) { clearTimeout(t); resolve({ error: e }); }
+    );
+  });
+}
+
+// Запускает код ученика и все тесты задачи. Возвращает промис { status, results?, message?, logs }.
+// Если функция вернула промис (async-задачи), тест ждёт его результат.
+async function jspRun(code, fnName, tests) {
   var logs = [];
   var methods = ['log', 'info', 'warn', 'error'];
   var saved = {};
@@ -97,12 +110,14 @@ function jspRun(code, fnName, tests) {
     }
     if (typeof fn !== 'function') return { status: 'nofn', logs: logs };
 
-    var results = tests.map(function (t, index) {
+    var results = [];
+    for (var index = 0; index < tests.length; index++) {
+      var t = tests[index];
       var r = {
         index: index,
         hidden: !!t.hidden,
-        label: t.code || (fnName + '(' + (t.args || []).map(function (a) { return jspShow(a); }).join(', ') + ')'),
-        expected: jspShow(t.expected)
+        label: t.label || t.code || (fnName + '(' + (t.args || []).map(function (a) { return jspShow(a); }).join(', ') + ')'),
+        expected: 'expectedError' in t ? 'ошибка ' + jspShow(t.expectedError) : jspShow(t.expected)
       };
       try {
         var got;
@@ -116,17 +131,33 @@ function jspRun(code, fnName, tests) {
             r.pass = false;
             r.got = jspShow(got);
             r.note = 'Функция изменила входной массив. Работай с копией: [...arr].';
-            return r;
+            results.push(r);
+            continue;
           }
         }
-        r.got = jspShow(got);
-        r.pass = jspEqual(got, t.expected);
+        var settled = await jspAwait(got, 400);
+        if (settled.stuck) {
+          r.pass = false;
+          r.got = 'промис не завершился';
+          r.note = 'Промис так и не выполнился. Проверь, что resolve или reject вызываются во всех ветках.';
+        } else if ('error' in settled) {
+          if ('expectedError' in t) {
+            r.got = 'ошибка ' + jspShow(settled.error && settled.error.message);
+            r.pass = !!settled.error && settled.error.message === t.expectedError;
+          } else {
+            r.pass = false;
+            r.error = 'Промис отклонён: ' + jspErrorText(settled.error);
+          }
+        } else {
+          r.got = jspShow(settled.value);
+          r.pass = !('expectedError' in t) && jspEqual(settled.value, t.expected);
+        }
       } catch (err) {
         r.pass = false;
         r.error = jspErrorText(err);
       }
-      return r;
-    });
+      results.push(r);
+    }
     return { status: 'done', results: results, logs: logs };
   } finally {
     methods.forEach(function (m) { console[m] = saved[m]; });
@@ -138,6 +169,6 @@ if (typeof importScripts === 'function') {
   var jspSend = self.postMessage.bind(self);
   self.onmessage = function (e) {
     var d = e.data;
-    jspSend(jspRun(d.code, d.fnName, d.tests));
+    jspRun(d.code, d.fnName, d.tests).then(jspSend);
   };
 }

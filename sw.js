@@ -1,6 +1,6 @@
 // Офлайн-режим: приложение кэшируется при первом открытии и дальше работает без интернета.
-const CACHE = 'js-practice-7ee6dffc';
-const SHELL = ["./","index.html","style.css","app.js","runner.js","course-1.js","course-2.js","manifest.webmanifest","icon-192.png","icon-512.png","apple-touch-icon.png"];
+const CACHE = 'js-practice-aa052ede';
+const SHELL = ["./","index.html","style.css","app.js","runner.js","course-1.js","course-2.js","course-3.js","manifest.webmanifest","icon-192.png","icon-512.png","apple-touch-icon.png"];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });

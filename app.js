@@ -137,7 +137,7 @@
     return found ? found[1] : '';
   }
 
-  const callLabel = (task, t) => t.code || task.fn + '(' + (t.args || []).map(a => window.jspShow(a)).join(', ') + ')';
+  const callLabel = (task, t) => t.label || t.code || task.fn + '(' + (t.args || []).map(a => window.jspShow(a)).join(', ') + ')';
 
   function insertText(ta, text) {
     ta.focus();
@@ -350,7 +350,7 @@
     html += '<main><article class="task"><h1 id="task-title">' + esc(task.title) + (state.solved[k] ? '<span class="badge">решена</span>' : '') + '</h1>';
     html += '<div class="statement">' + paragraphs(task.text) + '</div>';
     html += '<div class="examples"><h2 class="small-h">Примеры</h2><ul>' +
-      visible.map(t => '<li><code>' + esc(callLabel(task, t)) + '</code><span class="ex-res"><span class="muted">→</span><code>' + esc(window.jspShow(t.expected)) + '</code></span></li>').join('') +
+      visible.map(t => '<li><code>' + esc(callLabel(task, t)) + '</code><span class="ex-res"><span class="muted">→</span><code>' + esc('expectedError' in t ? 'ошибка ' + window.jspShow(t.expectedError) : window.jspShow(t.expected)) + '</code></span></li>').join('') +
       '</ul>' + (hiddenCount ? '<p class="muted small">И ещё ' + hiddenCount + ' ' + plural(hiddenCount, 'скрытый тест', 'скрытых теста', 'скрытых тестов') + ' на крайние случаи.</p>' : '') + '</div>';
     html += '<div class="editor-box"><div class="symbols" role="toolbar" aria-label="Символы для кода">' +
       SYMBOLS.map((s, i) => '<button type="button" tabindex="-1" data-sym="' + i + '">' + esc(s.label) + '</button>').join('') + '</div>' +
