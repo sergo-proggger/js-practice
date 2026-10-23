@@ -21,7 +21,7 @@
   // ---------- прогресс ----------
 
   function loadState() {
-    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {}, exams: {}, plan: {} };
+    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {}, exams: {}, plan: {}, quizzes: {} };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
       if (saved && typeof saved === 'object') {
@@ -247,6 +247,43 @@
     });
   }
 
+  // Задачи на DOM: код запускается в мини-странице (iframe-песочнице) с настоящим document.
+  // Функции проверки берём из уже загруженного runner.js, чтобы не зависеть от сети и офлайн-кэша.
+  const FRAME_FNS = ['jspIsIdent', 'jspShow', 'jspEqual', 'jspClone', 'jspErrorText', 'jspAwait', 'jspRun'];
+  function runInFrame(code, fnName, tests) {
+    return new Promise(resolve => {
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('aria-hidden', 'true');
+      frame.tabIndex = -1;
+      frame.className = 'dom-frame';
+      const src = FRAME_FNS.map(n => window[n].toString()).join('\n') +
+        '\nwindow.addEventListener("message", function (e) { jspRun(e.data.code, e.data.fnName, e.data.tests).then(function (r) { parent.postMessage({ jspFrame: true, result: r }, "*"); }); });';
+      frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head><body><script>' + src.replace(/<\/script/gi, '<\\/script') + '<\/script></body></html>';
+      let finished = false;
+      let timer = null;
+      const onMessage = e => {
+        if (e.source === frame.contentWindow && e.data && e.data.jspFrame) finish(e.data.result);
+      };
+      const finish = res => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        window.removeEventListener('message', onMessage);
+        frame.remove();
+        resolve(res);
+      };
+      window.addEventListener('message', onMessage);
+      frame.addEventListener('load', () => {
+        timer = setTimeout(() => finish({ status: 'timeout', logs: [] }), RUN_TIMEOUT);
+        frame.contentWindow.postMessage({ code, fnName, tests }, '*');
+      });
+      document.body.appendChild(frame);
+    });
+  }
+
+  const runTask = (task, code) => (task.dom ? runInFrame : runInWorker)(code, task.fn, task.tests);
+
   function logsBlock(logs) {
     if (!logs || !logs.length) return '';
     return '<details class="logs" open><summary>Вывод console.log</summary><pre>' + esc(logs.join('\n')) + '</pre></details>';
@@ -349,19 +386,24 @@
       const st = state.exams[step.exam];
       return st && st.history && st.history.length ? st.history[st.history.length - 1].date : null;
     }
+    if (step.quiz) {
+      const st = state.quizzes[step.quiz];
+      return st && st.history && st.history.length ? st.history[st.history.length - 1].date : null;
+    }
     return state.plan['done:' + step.id] || null;
   }
 
   function stepTitle(step) {
     if (step.lesson) return COURSE.lessons[step.lesson].title;
     if (step.exam) return findExam(step.exam).title;
+    if (step.quiz) return findQuiz(step.quiz).title;
     return step.title;
   }
 
   function renderToday() {
     const plan = COURSE.plan;
     if (!plan) return '';
-    const steps = plan.steps.filter(s => (s.lesson ? COURSE.lessons[s.lesson] : s.exam || s.review ? findExam(s.exam || s.review) : true));
+    const steps = plan.steps.filter(s => (s.lesson ? COURSE.lessons[s.lesson] : s.exam || s.review ? findExam(s.exam || s.review) : s.quiz ? findQuiz(s.quiz) : true));
     const today = dateKey(new Date());
     const idx = steps.findIndex(s => !stepDate(s));
     const doneToday = steps.filter(s => stepDate(s) === today);
@@ -405,10 +447,15 @@
       html += '</ol><a class="btn primary" href="' + (quizDone ? '#/t/' + step.lesson + '/' + (firstOpen ? firstOpen.id : lesson.tasks[0].id) : '#/l/' + step.lesson) + '">' + (quizDone ? 'К задачам' : 'Начать урок') + '</a>';
     } else if (step.exam) {
       const ex = findExam(step.exam);
-      html += '<li><span>Выдели ' + Math.round(ex.minutes / 60 * 10) / 10 + ' часа подряд, когда никто не отвлечёт. Телефон в беззвучный.</span></li>' +
+      html += '<li><span>Выдели ' + String(Math.round(ex.minutes / 60 * 10) / 10).replace('.', ',') + ' часа подряд, когда никто не отвлечёт. Телефон в беззвучный.</span></li>' +
         '<li><span>Начни с задач A и B, они самые простые. Застрял — переходи к следующей и возвращайся потом.</span></li>' +
         '<li><span>Справочником пользоваться можно, готовые ответы искать нельзя.</span></li></ol>' +
         '<a class="btn primary" href="#/exam/' + ex.id + '">Перейти к экзамену</a>';
+    } else if (step.quiz) {
+      const qz = findQuiz(step.quiz);
+      html += '<li><span>' + qz.questions.length + ' вопросов на ' + qz.minutes + ' минут, как на настоящем тесте. Сначала отвечай на те, в которых уверен, сомнительные пропускай и возвращайся.</span></li>' +
+        '<li><span>После теста разбери каждую ошибку: объяснение покажется прямо под вопросом. Тему, где больше всего ошибок, перечитай в уроке.</span></li></ol>' +
+        '<a class="btn primary" href="#/quiz/' + qz.id + '">Перейти к тесту</a>';
     } else {
       html += '<li><span>' + inline(step.text) + '</span></li></ol>' +
         '<div class="actions"><a class="btn" href="#/exam/' + step.review + '">Открыть результат и разбор</a>' +
@@ -498,6 +545,10 @@
       COURSE.exams.forEach((ex, i) => {
         html += '<li><a class="row" href="#/exam/' + ex.id + '"><span class="row-num">' + (i + 1) + '</span>' +
           '<span class="row-title">' + esc(ex.title) + '</span><span class="row-meta">' + esc(examMeta(ex)) + '</span></a></li>';
+      });
+      (COURSE.quizzes || []).forEach((qz, i) => {
+        html += '<li><a class="row" href="#/quiz/' + qz.id + '"><span class="row-num">' + (COURSE.exams.length + i + 1) + '</span>' +
+          '<span class="row-title">' + esc(qz.title) + '</span><span class="row-meta">' + esc(quizMeta(qz)) + '</span></a></li>';
       });
       html += '</ol></section>';
     }
@@ -710,7 +761,7 @@
       save();
       resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
       runBtn.disabled = true;
-      runInWorker(editor.value, task.fn, task.tests).then(res => {
+      runTask(task, editor.value).then(res => {
         runBtn.disabled = false;
         showResult(res);
       });
@@ -906,7 +957,7 @@
       save();
       resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
       runBtn.disabled = true;
-      runInWorker(editor.value, task.fn, task.tests).then(res => {
+      runTask(task, editor.value).then(res => {
         runBtn.disabled = false;
         if (st.end) return; // время вышло во время проверки
         const failed = failedRunHtml(res, task.fn);
@@ -994,7 +1045,7 @@
       saveCode();
       resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
       runBtn.disabled = true;
-      runInWorker(editor.value, task.fn, task.tests).then(res => {
+      runTask(task, editor.value).then(res => {
         runBtn.disabled = false;
         const failed = failedRunHtml(res, task.fn);
         if (failed) {
@@ -1011,6 +1062,181 @@
     }
   }
 
+  // ---------- пробный тест с вопросами ----------
+  // Состояние в state.quizzes[id]: start, end, answers (номер вопроса → номер ответа), history.
+  // Время считается от start, как у экзамена.
+
+  const findQuiz = id => (COURSE.quizzes || []).find(q => q.id === id);
+  const quizLimit = qz => qz.minutes * 60000;
+  const quizScore = (qz, st) => qz.questions.filter((q, i) => st.answers[i] === q.answer).length;
+
+  function quizState(qz) {
+    const st = state.quizzes[qz.id];
+    if (st && st.start && !st.end && Date.now() >= st.start + quizLimit(qz)) {
+      st.end = st.start + quizLimit(qz);
+      finishQuizRecord(qz, st);
+    }
+    return st;
+  }
+
+  function finishQuizRecord(qz, st) {
+    st.history = st.history || [];
+    st.history.push({ date: dateKey(new Date(st.end)), score: quizScore(qz, st), minutes: Math.max(1, Math.round((st.end - st.start) / 60000)) });
+    state.days[dateKey(new Date(st.end))] = true;
+    save();
+  }
+
+  function quizMeta(qz) {
+    const st = quizState(qz);
+    if (st && st.start && !st.end) return 'идёт, осталось ' + clock(st.start + quizLimit(qz) - Date.now());
+    if (st && st.history && st.history.length) return 'лучший результат ' + Math.max(...st.history.map(h => h.score)) + ' из ' + qz.questions.length;
+    return qz.questions.length + ' вопросов · ' + qz.minutes + ' мин';
+  }
+
+  function renderQuiz(id) {
+    const qz = findQuiz(id);
+    if (!qz) return renderHome();
+    const st = quizState(qz);
+    if (!st || !st.start) return renderQuizIntro(qz, st);
+    if (!st.end) return renderQuizRun(qz, st);
+    return renderQuizResult(qz, st);
+  }
+
+  function renderQuizIntro(qz, st) {
+    const hist = st && st.history ? st.history : [];
+    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-meta">Пробный тест</span></header>';
+    html += '<main><article class="lesson"><h1>' + esc(qz.title) + '</h1><div class="theory">';
+    html += '<p>' + qz.questions.length + ' вопросов с выбором ответа и ' + qz.minutes + ' минут. Темы: ' + Object.values(qz.topics).join(', ') + '.</p>';
+    html += '<ul class="t-list"><li>Ответ можно менять, пока тест не завершён.</li>' +
+      '<li>Правильные ответы и объяснения появятся после завершения.</li>' +
+      '<li>Таймер идёт, даже если закрыть приложение. Справочником и уроками во время теста не пользуйся: тест показывает, что уже в голове.</li></ul>';
+    if (hist.length) {
+      html += '<h2 class="t-h">Прошлые попытки</h2><ul class="t-list">' +
+        hist.map(h => '<li>' + esc(h.date) + ': ' + h.score + ' из ' + qz.questions.length + ' за ' + h.minutes + ' мин</li>').join('') + '</ul>';
+    }
+    html += '</div><div class="actions"><button type="button" class="btn primary" id="quiz-start">Начать тест</button></div></article></main>';
+    app.innerHTML = html;
+    document.title = qz.title + ' · JS-практика';
+    document.getElementById('quiz-start').addEventListener('click', () => {
+      state.quizzes[qz.id] = { start: Date.now(), end: null, answers: {}, history: hist };
+      save();
+      renderQuiz(qz.id);
+      window.scrollTo(0, 0);
+    });
+  }
+
+  function quizQuestionHtml(qz, st, q, i, reveal) {
+    const chosen = st.answers[i];
+    let html = '<div class="q quiz-q" data-q="' + i + '"><p class="q-text"><span class="muted">' + (i + 1) + '.</span> ' + inline(q.q) + '</p>';
+    if (q.code) html += codeBlock(q.code);
+    html += '<div class="q-options">';
+    q.options.forEach((o, j) => {
+      let cls = 'q-opt';
+      if (reveal && j === q.answer) cls += ' right';
+      else if (reveal && j === chosen) cls += ' wrong';
+      else if (!reveal && j === chosen) cls += ' picked';
+      html += '<button type="button" class="' + cls + '" data-opt="' + j + '"' + (reveal ? ' disabled' : '') + ' aria-pressed="' + (j === chosen) + '">' + inline(o) + '</button>';
+    });
+    html += '</div>';
+    if (reveal) {
+      html += '<p class="q-explain"><b>' + (chosen === q.answer ? 'Верно.' : chosen === undefined ? 'Нет ответа.' : 'Неверно.') + '</b> ' + inline(q.explain) + '</p>';
+    }
+    return html + '</div>';
+  }
+
+  function renderQuizRun(qz, st) {
+    const answered = () => Object.keys(st.answers).length;
+    let html = '<header class="top exam-top"><a class="back" href="#/">← Выйти</a>' +
+      '<span class="exam-clock" id="quiz-clock" role="timer">' + clock(st.start + quizLimit(qz) - Date.now()) + '</span>' +
+      '<button type="button" class="btn small ghost" id="quiz-finish">Завершить</button></header>';
+    html += '<main><article class="lesson"><h1>' + esc(qz.title) + '</h1>' +
+      '<p class="muted small" id="quiz-progress">Отвечено ' + answered() + ' из ' + qz.questions.length + '</p>';
+    html += '<section class="quiz">' + qz.questions.map((q, i) => quizQuestionHtml(qz, st, q, i, false)).join('') + '</section>';
+    html += '<div class="actions"><button type="button" class="btn primary" id="quiz-finish-2">Завершить тест</button></div></article></main>';
+    app.innerHTML = html;
+    document.title = qz.title;
+
+    const clockEl = document.getElementById('quiz-clock');
+    const tick = () => {
+      const left = st.start + quizLimit(qz) - Date.now();
+      if (left <= 0) {
+        clearInterval(examTimer);
+        examTimer = null;
+        finishQuiz(qz, st);
+        return;
+      }
+      clockEl.textContent = clock(left);
+      clockEl.classList.toggle('low', left < 5 * 60000);
+      document.title = clock(left) + ' · ' + qz.title;
+    };
+    tick();
+    examTimer = setInterval(tick, 1000);
+
+    app.querySelector('.quiz').addEventListener('click', e => {
+      const btn = e.target.closest('.q-opt');
+      if (!btn || st.end) return;
+      const box = btn.closest('.quiz-q');
+      const i = Number(box.dataset.q);
+      st.answers[i] = Number(btn.dataset.opt);
+      save();
+      box.querySelectorAll('.q-opt').forEach(b => {
+        const on = b === btn;
+        b.classList.toggle('picked', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      document.getElementById('quiz-progress').textContent = 'Отвечено ' + answered() + ' из ' + qz.questions.length;
+    });
+    const askFinish = () => {
+      const left = qz.questions.length - answered();
+      if (confirm(left ? 'Без ответа ' + left + ' ' + plural(left, 'вопрос', 'вопроса', 'вопросов') + '. Завершить тест?' : 'Завершить тест?')) finishQuiz(qz, st);
+    };
+    document.getElementById('quiz-finish').addEventListener('click', askFinish);
+    document.getElementById('quiz-finish-2').addEventListener('click', askFinish);
+  }
+
+  function finishQuiz(qz, st) {
+    if (st.end) return;
+    st.end = Math.min(Date.now(), st.start + quizLimit(qz));
+    finishQuizRecord(qz, st);
+    clearInterval(examTimer);
+    examTimer = null;
+    renderQuiz(qz.id);
+    window.scrollTo(0, 0);
+  }
+
+  function renderQuizResult(qz, st) {
+    const score = quizScore(qz, st);
+    const total = qz.questions.length;
+    const share = score / total;
+    const verdict = share >= 0.8 ? 'Отличный результат, с таким уровнем тест не страшен.'
+      : share >= 0.6 ? 'Хорошо. Разбери ошибки и перечитай темы, где их больше всего.'
+      : 'Пока слабовато, и это нормально для первой попытки. Перечитай уроки по темам с ошибками и пройди тест ещё раз через пару дней.';
+    const byTopic = Object.keys(qz.topics).map(t => {
+      const qs = qz.questions.map((q, i) => ({ q, i })).filter(x => x.q.topic === t);
+      const ok = qs.filter(x => st.answers[x.i] === x.q.answer).length;
+      return '<li><span>' + esc(qz.topics[t]) + '</span><b class="' + (ok === qs.length ? 'good' : '') + '">' + ok + ' из ' + qs.length + '</b></li>';
+    }).join('');
+    const wrong = qz.questions.map((q, i) => ({ q, i })).filter(x => st.answers[x.i] !== x.q.answer);
+    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-meta">Результат</span></header>';
+    html += '<main><article class="lesson"><h1>' + score + ' из ' + total + '</h1>';
+    html += '<p class="lead">' + esc(qz.title) + ' за ' + Math.max(1, Math.round((st.end - st.start) / 60000)) + ' мин. ' + verdict + '</p>';
+    html += '<ul class="topic-score">' + byTopic + '</ul>';
+    if (wrong.length) {
+      html += '<h2 class="section-h">Ошибки: ' + wrong.length + '</h2><section class="quiz">' + wrong.map(x => quizQuestionHtml(qz, st, x.q, x.i, true)).join('') + '</section>';
+    }
+    html += '<details class="review-sol"><summary>Все вопросы с ответами</summary><section class="quiz">' +
+      qz.questions.map((q, i) => quizQuestionHtml(qz, st, q, i, true)).join('') + '</section></details>';
+    html += '<div class="actions"><button type="button" class="btn primary" id="quiz-again">Пройти заново</button></div></article></main>';
+    app.innerHTML = html;
+    document.title = 'Результат · ' + qz.title;
+    document.getElementById('quiz-again').addEventListener('click', () => {
+      state.quizzes[qz.id] = { history: st.history || [] };
+      save();
+      renderQuizIntro(qz, state.quizzes[qz.id]);
+      window.scrollTo(0, 0);
+    });
+  }
+
   // ---------- маршруты ----------
 
   function route() {
@@ -1020,6 +1246,7 @@
     if (parts[0] === 'l' && parts[1]) renderLesson(parts[1]);
     else if (parts[0] === 't' && parts[1] && parts[2]) renderTask(parts[1], parts[2]);
     else if (parts[0] === 'exam' && parts[1]) renderExam(parts[1], parts[2]);
+    else if (parts[0] === 'quiz' && parts[1]) renderQuiz(parts[1]);
     else renderHome();
     window.scrollTo(0, 0);
   }

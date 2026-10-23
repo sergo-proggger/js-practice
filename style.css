@@ -457,3 +457,13 @@ details .code { margin-top: 8px; }
   .top-links { gap: 10px; }
   .top-links .top-link { display: none; }
 }
+
+/* мини-страница для задач на DOM: работает невидимо */
+.dom-frame { position: absolute; width: 0; height: 0; border: 0; visibility: hidden; }
+
+/* пробный тест с вопросами */
+.quiz-q .q-opt.picked { border-color: var(--accent); background: var(--accent-soft); }
+.topic-score { list-style: none; margin: 16px 0 0; padding: 0; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+.topic-score li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; }
+.topic-score li + li { border-top: 1px solid var(--line); }
+.topic-score .good { color: var(--ok); }
