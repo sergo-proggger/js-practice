@@ -368,3 +368,45 @@ details .code { margin-top: 8px; }
   font-size: 15px;
 }
 .pager a { text-decoration: none; }
+
+/* пробный экзамен */
+.exam-lead { margin: -4px 0 12px; }
+.exam-top { gap: 12px; }
+.exam-top .btn { min-height: 36px; }
+.exam-clock {
+  font: 600 20px/1 var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  padding: 6px 12px;
+  border-radius: var(--r);
+  background: var(--surface-2);
+}
+.exam-clock.low { background: var(--bad-soft); color: var(--bad); }
+.exam-tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin: 4px 0 20px;
+}
+.exam-tabs a {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 13px;
+}
+.exam-tabs a b { font-size: 16px; }
+.exam-tabs a span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.exam-tabs a.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.exam-tabs a.full { background: var(--ok-soft); border-color: var(--ok); }
+.exam-tabs a.full span { color: var(--ok); }
+.exam-tabs a.part { background: var(--note-soft); }
+.exam-tabs a.zero span { color: var(--bad); }
+.review { margin-top: 8px; }
+.review-sol { margin-top: 14px; display: grid; gap: 10px; }
+.review-sol summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.review-sol[open] summary { margin-bottom: 10px; }

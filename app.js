@@ -21,7 +21,7 @@
   // ---------- прогресс ----------
 
   function loadState() {
-    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {} };
+    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {}, exams: {} };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
       if (saved && typeof saved === 'object') {
@@ -149,6 +149,160 @@
     }
   }
 
+  // ---------- редактор и проверка (общие для задач и экзамена) ----------
+
+  const editorHtml = () => '<div class="editor-box"><div class="symbols" role="toolbar" aria-label="Символы для кода">' +
+    SYMBOLS.map((s, i) => '<button type="button" tabindex="-1" data-sym="' + i + '">' + esc(s.label) + '</button>').join('') + '</div>' +
+    '<textarea id="code" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="Код решения"></textarea></div>';
+
+  // Клавиши и панель символов. onSave — сохранить код, onRun — проверка по Ctrl/⌘ + Enter.
+  function setupEditor(editor, onSave, onRun) {
+    let saveTimer = null;
+    editor.addEventListener('input', () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(onSave, 400);
+    });
+    editor.addEventListener('blur', onSave);
+
+    editor.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        onRun();
+        return;
+      }
+      if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        insertText(editor, '  ');
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing) {
+        // перенос строки с тем же отступом, после открывающей скобки отступ больше
+        const v = editor.value;
+        const pos = editor.selectionStart;
+        const lineStart = v.lastIndexOf('\n', pos - 1) + 1;
+        const before = v.slice(lineStart, pos);
+        const indent = before.match(/^[ \t]*/)[0];
+        const last = before.trimEnd().slice(-1);
+        const closer = { '{': '}', '[': ']', '(': ')' }[last];
+        e.preventDefault();
+        if (closer) {
+          const after = v.slice(editor.selectionEnd).match(/^[ \t]*(.)/);
+          if (after && after[1] === closer) {
+            insertText(editor, '\n' + indent + '  \n' + indent);
+            const p = editor.selectionStart - indent.length - 1;
+            editor.setSelectionRange(p, p);
+            return;
+          }
+          insertText(editor, '\n' + indent + '  ');
+          return;
+        }
+        insertText(editor, '\n' + indent);
+      }
+    });
+
+    const bar = app.querySelector('.symbols');
+    bar.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) e.preventDefault(); // не забирать фокус у редактора
+    });
+    bar.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const s = SYMBOLS[Number(btn.dataset.sym)];
+      if (s.move) {
+        editor.focus();
+        const p = Math.max(0, Math.min(editor.value.length, editor.selectionStart + s.move));
+        editor.setSelectionRange(p, p);
+        return;
+      }
+      insertText(editor, s.text || s.label);
+    });
+  }
+
+  // Запуск тестов в отдельном воркере: бесконечный или слишком медленный код обрывается через RUN_TIMEOUT
+  function runInWorker(code, fnName, tests) {
+    return new Promise(resolve => {
+      let worker;
+      try {
+        worker = new Worker('runner.js');
+      } catch (e) {
+        resolve({ status: 'noworker', logs: [] });
+        return;
+      }
+      let finished = false;
+      let timer = null;
+      const finish = res => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve(res);
+      };
+      timer = setTimeout(() => finish({ status: 'timeout', logs: [] }), RUN_TIMEOUT);
+      worker.onmessage = e => finish(e.data);
+      worker.onerror = e => {
+        e.preventDefault();
+        finish({ status: 'compile', message: e.message || 'Ошибка при запуске кода', logs: [] });
+      };
+      worker.postMessage({ code, fnName, tests });
+    });
+  }
+
+  function logsBlock(logs) {
+    if (!logs || !logs.length) return '';
+    return '<details class="logs" open><summary>Вывод console.log</summary><pre>' + esc(logs.join('\n')) + '</pre></details>';
+  }
+
+  // Ответ, когда тесты не запустились. Для обычного результата возвращает ''.
+  function failedRunHtml(res, fnName) {
+    const logs = logsBlock(res.logs);
+    if (res.status === 'noworker') {
+      return '<div class="res res-bad"><p class="res-title">Не удалось запустить проверку</p><p>Открой приложение по его адресу в интернете, а не как файл с диска.</p></div>';
+    }
+    if (res.status === 'timeout') {
+      return '<div class="res res-bad"><p class="res-title">Код работал дольше двух секунд, и проверка его остановила</p>' +
+        '<p>Либо цикл никогда не заканчивается, либо решение слишком медленное для больших данных. Проверь условие и шаг цикла и оцени сложность: перебор всех пар на 100 000 элементов не успеет.</p></div>';
+    }
+    if (res.status === 'compile') {
+      const hint = errorHint(res.message);
+      return '<div class="res res-bad"><p class="res-title">Код не запустился</p><pre class="err">' + esc(res.message) + '</pre>' +
+        '<p>' + (hint ? inline(hint) : 'Частые причины: незакрытая скобка или кавычка, опечатка в имени, лишняя запятая.') + '</p>' + logs + '</div>';
+    }
+    if (res.status === 'nofn') {
+      return '<div class="res res-bad"><p class="res-title">Не найдена функция ' + esc(fnName) + '</p>' +
+        '<p>Проверь, что функция называется именно <code>' + esc(fnName) + '</code> и строка с её объявлением на месте.</p>' + logs + '</div>';
+    }
+    return '';
+  }
+
+  // examMode: у скрытых тестов не показываем входные данные и ответ, как на контесте
+  function testItem(r, examMode) {
+    const n = r.index + 1;
+    const title = r.hidden ? 'Скрытый тест ' + n : '<code>' + esc(r.label) + '</code>';
+    if (r.pass) {
+      return '<li class="t-ok"><span class="mark" aria-hidden="true">✓</span><span class="t-label">' + title + '<span class="sr"> пройден</span></span></li>';
+    }
+    if (examMode && r.hidden) {
+      const verdict = r.error ? 'ошибка во время выполнения' : 'неверный ответ';
+      return '<li class="t-fail"><span class="mark" aria-hidden="true">✗</span><span class="t-label">' + title + ': ' + verdict + '</span></li>';
+    }
+    let body = '';
+    if (r.hidden) body += '<div class="t-line"><span>Вызов</span><code>' + esc(r.label) + '</code></div>';
+    body += '<div class="t-line"><span>Ожидалось</span><code>' + esc(trunc(r.expected)) + '</code></div>';
+    if (r.error) {
+      body += '<div class="t-line"><span>Ошибка</span><code>' + esc(r.error) + '</code></div>';
+      const hint = errorHint(r.error);
+      if (hint) body += '<p class="t-hint">' + inline(hint) + '</p>';
+    } else {
+      body += '<div class="t-line"><span>Получено</span><code>' + esc(trunc(r.got)) + '</code></div>';
+    }
+    if (r.note) body += '<p class="t-note">' + esc(r.note) + '</p>';
+    return '<li class="t-fail"><span class="mark" aria-hidden="true">✗</span><span class="t-label">' + title + '<span class="sr"> не пройден</span></span><div class="t-body">' + body + '</div></li>';
+  }
+
+  const examplesHtml = (task, visible, hiddenCount) => '<div class="examples"><h2 class="small-h">Примеры</h2><ul>' +
+    visible.map(t => '<li><code>' + esc(callLabel(task, t)) + '</code><span class="ex-res"><span class="muted">→</span><code>' + esc('expectedError' in t ? 'ошибка ' + window.jspShow(t.expectedError) : window.jspShow(t.expected)) + '</code></span></li>').join('') +
+    '</ul>' + (hiddenCount ? '<p class="muted small">И ещё ' + hiddenCount + ' ' + plural(hiddenCount, 'скрытый тест', 'скрытых теста', 'скрытых тестов') + ' на крайние случаи.</p>' : '') + '</div>';
+
   // ---------- главная ----------
 
   function renderHome() {
@@ -193,6 +347,16 @@
       html += '<section class="goal"><h2>' + esc(g.title) + '</h2><p>' + inline(g.text) + '</p>' +
         '<p class="goal-left">' + leftText + '</p><p class="muted small">' + inline(g.daily) + '</p>' +
         '<a href="' + g.url + '" target="_blank" rel="noopener">Страница стажировки ↗</a></section>';
+    }
+
+    if (COURSE.exams && COURSE.exams.length) {
+      html += '<section class="module"><div class="module-head"><h2>Пробные экзамены</h2><span class="muted">с таймером, как на контесте</span></div>' +
+        '<p class="muted small exam-lead">Шесть задач от простой к сложной, общее время, без подсказок. Разбор откроется после завершения.</p><ol class="row-list">';
+      COURSE.exams.forEach((ex, i) => {
+        html += '<li><a class="row" href="#/exam/' + ex.id + '"><span class="row-num">' + (i + 1) + '</span>' +
+          '<span class="row-title">' + esc(ex.title) + '</span><span class="row-meta">' + esc(examMeta(ex)) + '</span></a></li>';
+      });
+      html += '</ol></section>';
     }
 
     for (const m of COURSE.modules) {
@@ -305,31 +469,6 @@
 
   // ---------- задача ----------
 
-  function testItem(r) {
-    const n = r.index + 1;
-    const title = r.hidden ? 'Скрытый тест ' + n : '<code>' + esc(r.label) + '</code>';
-    if (r.pass) {
-      return '<li class="t-ok"><span class="mark" aria-hidden="true">✓</span><span class="t-label">' + title + '<span class="sr"> пройден</span></span></li>';
-    }
-    let body = '';
-    if (r.hidden) body += '<div class="t-line"><span>Вызов</span><code>' + esc(r.label) + '</code></div>';
-    body += '<div class="t-line"><span>Ожидалось</span><code>' + esc(trunc(r.expected)) + '</code></div>';
-    if (r.error) {
-      body += '<div class="t-line"><span>Ошибка</span><code>' + esc(r.error) + '</code></div>';
-      const hint = errorHint(r.error);
-      if (hint) body += '<p class="t-hint">' + inline(hint) + '</p>';
-    } else {
-      body += '<div class="t-line"><span>Получено</span><code>' + esc(trunc(r.got)) + '</code></div>';
-    }
-    if (r.note) body += '<p class="t-note">' + esc(r.note) + '</p>';
-    return '<li class="t-fail"><span class="mark" aria-hidden="true">✗</span><span class="t-label">' + title + '<span class="sr"> не пройден</span></span><div class="t-body">' + body + '</div></li>';
-  }
-
-  function logsBlock(logs) {
-    if (!logs || !logs.length) return '';
-    return '<details class="logs" open><summary>Вывод console.log</summary><pre>' + esc(logs.join('\n')) + '</pre></details>';
-  }
-
   function renderTask(lid, tid) {
     const lesson = COURSE.lessons[lid];
     const tIndex = lesson ? lesson.tasks.findIndex(t => t.id === tid) : -1;
@@ -349,12 +488,8 @@
       '<span class="top-meta">Задача ' + (tIndex + 1) + ' из ' + lesson.tasks.length + '</span></header>';
     html += '<main><article class="task"><h1 id="task-title">' + esc(task.title) + (state.solved[k] ? '<span class="badge">решена</span>' : '') + '</h1>';
     html += '<div class="statement">' + paragraphs(task.text) + '</div>';
-    html += '<div class="examples"><h2 class="small-h">Примеры</h2><ul>' +
-      visible.map(t => '<li><code>' + esc(callLabel(task, t)) + '</code><span class="ex-res"><span class="muted">→</span><code>' + esc('expectedError' in t ? 'ошибка ' + window.jspShow(t.expectedError) : window.jspShow(t.expected)) + '</code></span></li>').join('') +
-      '</ul>' + (hiddenCount ? '<p class="muted small">И ещё ' + hiddenCount + ' ' + plural(hiddenCount, 'скрытый тест', 'скрытых теста', 'скрытых тестов') + ' на крайние случаи.</p>' : '') + '</div>';
-    html += '<div class="editor-box"><div class="symbols" role="toolbar" aria-label="Символы для кода">' +
-      SYMBOLS.map((s, i) => '<button type="button" tabindex="-1" data-sym="' + i + '">' + esc(s.label) + '</button>').join('') + '</div>' +
-      '<textarea id="code" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="Код решения"></textarea></div>';
+    html += examplesHtml(task, visible, hiddenCount);
+    html += editorHtml();
     html += '<div class="actions"><button type="button" class="btn primary" id="run">Проверить</button>' +
       '<button type="button" class="btn" id="hint-btn">Подсказка</button>' +
       '<button type="button" class="btn ghost" id="solution-btn">Решение</button>' +
@@ -370,67 +505,8 @@
 
     const editor = document.getElementById('code');
     editor.value = state.code[k] !== undefined ? state.code[k] : task.starter.join('\n');
-
-    let saveTimer = null;
     const saveCode = () => { state.code[k] = editor.value; save(); };
-    editor.addEventListener('input', () => {
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(saveCode, 400);
-    });
-    editor.addEventListener('blur', saveCode);
-
-    editor.addEventListener('keydown', e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        e.preventDefault();
-        runCheck();
-        return;
-      }
-      if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        e.preventDefault();
-        insertText(editor, '  ');
-        return;
-      }
-      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing) {
-        // перенос строки с тем же отступом, после открывающей скобки отступ больше
-        const v = editor.value;
-        const pos = editor.selectionStart;
-        const lineStart = v.lastIndexOf('\n', pos - 1) + 1;
-        const before = v.slice(lineStart, pos);
-        const indent = before.match(/^[ \t]*/)[0];
-        const last = before.trimEnd().slice(-1);
-        const closer = { '{': '}', '[': ']', '(': ')' }[last];
-        e.preventDefault();
-        if (closer) {
-          const after = v.slice(editor.selectionEnd).match(/^[ \t]*(.)/);
-          if (after && after[1] === closer) {
-            insertText(editor, '\n' + indent + '  \n' + indent);
-            const p = editor.selectionStart - indent.length - 1;
-            editor.setSelectionRange(p, p);
-            return;
-          }
-          insertText(editor, '\n' + indent + '  ');
-          return;
-        }
-        insertText(editor, '\n' + indent);
-      }
-    });
-
-    const bar = app.querySelector('.symbols');
-    bar.addEventListener('pointerdown', e => {
-      if (e.target.closest('button')) e.preventDefault(); // не забирать фокус у редактора
-    });
-    bar.addEventListener('click', e => {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-      const s = SYMBOLS[Number(btn.dataset.sym)];
-      if (s.move) {
-        editor.focus();
-        const p = Math.max(0, Math.min(editor.value.length, editor.selectionStart + s.move));
-        editor.setSelectionRange(p, p);
-        return;
-      }
-      insertText(editor, s.text || s.label);
-    });
+    setupEditor(editor, saveCode, () => runCheck());
 
     // подсказки
     const hintBtn = document.getElementById('hint-btn');
@@ -490,59 +566,24 @@
       save();
       resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
       runBtn.disabled = true;
-
-      let worker;
-      try {
-        worker = new Worker('runner.js');
-      } catch (e) {
-        runBtn.disabled = false;
-        resultBox.innerHTML = '<div class="res res-bad"><p class="res-title">Не удалось запустить проверку</p><p>Открой приложение по его адресу в интернете, а не как файл с диска.</p></div>';
-        return;
-      }
-      let finished = false;
-      let timer = null;
-      const finish = res => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        worker.terminate();
+      runInWorker(editor.value, task.fn, task.tests).then(res => {
         runBtn.disabled = false;
         showResult(res);
-      };
-      timer = setTimeout(() => finish({ status: 'timeout', logs: [] }), RUN_TIMEOUT);
-      worker.onmessage = e => finish(e.data);
-      worker.onerror = e => {
-        e.preventDefault();
-        finish({ status: 'compile', message: e.message || 'Ошибка при запуске кода', logs: [] });
-      };
-      worker.postMessage({ code: editor.value, fnName: task.fn, tests: task.tests });
+      });
     }
 
     function showResult(res) {
-      const logs = logsBlock(res.logs);
-      if (res.status === 'timeout') {
-        resultBox.innerHTML = '<div class="res res-bad"><p class="res-title">Код работал дольше двух секунд, и проверка его остановила</p>' +
-          '<p>Похоже, цикл никогда не заканчивается. Проверь условие и шаг цикла. Чтобы найти место, выведи значения через <code>console.log</code> и временно ограничь число повторов.</p></div>';
+      const failed = failedRunHtml(res, task.fn);
+      if (failed) {
+        resultBox.innerHTML = failed;
         return;
       }
-      if (res.status === 'compile') {
-        const hint = errorHint(res.message);
-        resultBox.innerHTML = '<div class="res res-bad"><p class="res-title">Код не запустился</p><pre class="err">' + esc(res.message) + '</pre>' +
-          '<p>' + (hint ? inline(hint) : 'Частые причины: незакрытая скобка или кавычка, опечатка в имени, лишняя запятая.') + '</p>' + logs + '</div>';
-        return;
-      }
-      if (res.status === 'nofn') {
-        resultBox.innerHTML = '<div class="res res-bad"><p class="res-title">Не найдена функция ' + esc(task.fn) + '</p>' +
-          '<p>Проверь, что функция называется именно <code>' + esc(task.fn) + '</code> и строка с её объявлением на месте.</p>' + logs + '</div>';
-        return;
-      }
-
       const results = res.results;
       const passed = results.filter(r => r.pass).length;
       const all = passed === results.length;
       let html = '<div class="res ' + (all ? 'res-ok' : 'res-bad') + '"><p class="res-title">' +
         (all ? 'Все тесты пройдены' : 'Пройдено ' + passed + ' из ' + results.length) + '</p>' +
-        '<ul class="tests">' + results.map(testItem).join('') + '</ul>' + logs;
+        '<ul class="tests">' + results.map(r => testItem(r, false)).join('') + '</ul>' + logsBlock(res.logs);
 
       if (all) {
         const today = dateKey(new Date());
@@ -561,12 +602,277 @@
     }
   }
 
+  // ---------- пробный экзамен ----------
+  // Состояние в state.exams[id]: start и end (мс), code, best (лучшее число пройденных тестов),
+  // attempts по задачам и history с прошлыми результатами. Время считается от start,
+  // поэтому таймер не сбивается при перезагрузке страницы или закрытии приложения.
+
+  let examTimer = null;
+  const findExam = id => (COURSE.exams || []).find(e => e.id === id);
+  const examLimit = ex => ex.minutes * 60000;
+
+  function examState(ex) {
+    const st = state.exams[ex.id];
+    if (st && st.start && !st.end && Date.now() >= st.start + examLimit(ex)) {
+      st.end = st.start + examLimit(ex); // время вышло, пока приложение было закрыто
+      finishExamRecord(ex, st);
+    }
+    return st;
+  }
+
+  const taskPoints = (task, passed) => Math.round(100 * (passed || 0) / task.tests.length);
+  const examScore = (ex, st) => ex.tasks.reduce((s, t) => s + taskPoints(t, st.best[t.id]), 0);
+
+  function finishExamRecord(ex, st) {
+    st.history = st.history || [];
+    st.history.push({ date: dateKey(new Date(st.end)), score: examScore(ex, st), minutes: Math.max(1, Math.round((st.end - st.start) / 60000)) });
+    state.days[dateKey(new Date(st.end))] = true;
+    save();
+  }
+
+  function examMeta(ex) {
+    const st = examState(ex);
+    if (st && st.start && !st.end) return 'идёт, осталось ' + clock(st.start + examLimit(ex) - Date.now());
+    const hist = st && st.history && st.history.length ? st.history : null;
+    if (hist) return 'лучший результат ' + Math.max(...hist.map(h => h.score)) + ' из ' + ex.tasks.length * 100;
+    return ex.tasks.length + ' задач · ' + String(Math.round(ex.minutes / 60 * 10) / 10).replace('.', ',') + ' ч';
+  }
+
+  function clock(ms) {
+    const t = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(t / 3600);
+    const m = Math.floor(t / 60) % 60;
+    const s = t % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  }
+
+  function renderExam(id, n) {
+    const ex = findExam(id);
+    if (!ex) return renderHome();
+    const st = examState(ex);
+    if (!st || !st.start) return renderExamIntro(ex, st);
+    if (!st.end) return renderExamTask(ex, st, Math.min(Math.max(Number(n) || 0, 0), ex.tasks.length - 1));
+    if (n !== undefined) return renderExamReview(ex, st, Math.min(Math.max(Number(n) || 0, 0), ex.tasks.length - 1));
+    return renderExamResult(ex, st);
+  }
+
+  function renderExamIntro(ex, st) {
+    const hist = st && st.history ? st.history : [];
+    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-meta">Пробный экзамен</span></header>';
+    html += '<main><article class="lesson"><h1>' + esc(ex.title) + '</h1><div class="theory">';
+    html += '<p>' + ex.tasks.length + ' задач от простой к сложной и ' + ex.minutes + ' минут на всё. Решать можно в любом порядке и отправлять сколько угодно раз, засчитывается лучшая попытка.</p>';
+    html += '<ul class="t-list">' +
+      '<li>Подсказок и готовых решений во время экзамена нет. Разбор каждой задачи откроется после завершения.</li>' +
+      '<li>У скрытых тестов видно только «пройден» или «неверный ответ», без входных данных, как на контесте.</li>' +
+      '<li>За задачу до 100 баллов: доля пройденных тестов. Медленное решение не успевает за 2 секунды на больших данных и теряет баллы.</li>' +
+      '<li>Таймер идёт, даже если закрыть приложение. Решай честно, без поиска ответов: так экзамен покажет реальный уровень.</li>' +
+      '</ul>';
+    if (COURSE.examInput) {
+      html += '<div class="note">На настоящем контесте функцию часто не дают: данные приходят на вход программы, а ответ нужно вывести. В JavaScript это обычно выглядит так:</div>' + codeBlock(COURSE.examInput);
+    }
+    if (hist.length) {
+      html += '<h2 class="t-h">Прошлые попытки</h2><ul class="t-list">' +
+        hist.map(h => '<li>' + esc(h.date) + ': ' + h.score + ' из ' + ex.tasks.length * 100 + ' за ' + h.minutes + ' мин</li>').join('') + '</ul>';
+    }
+    html += '</div><div class="actions"><button type="button" class="btn primary" id="exam-start">Начать экзамен</button>' +
+      (st && st.end ? '<a class="btn ghost" href="#/exam/' + ex.id + '/0">Разбор прошлой попытки</a>' : '') + '</div></article></main>';
+    app.innerHTML = html;
+    document.title = ex.title + ' · JS-практика';
+    document.getElementById('exam-start').addEventListener('click', () => {
+      state.exams[ex.id] = { start: Date.now(), end: null, code: {}, best: {}, attempts: {}, history: hist };
+      save();
+      location.hash = '#/exam/' + ex.id + '/0';
+    });
+  }
+
+  function examTabs(ex, st, n, base) {
+    return '<nav class="exam-tabs" aria-label="Задачи экзамена">' + ex.tasks.map((t, i) => {
+      const passed = st.best[t.id] || 0;
+      const cls = passed === t.tests.length ? 'full' : passed ? 'part' : (st.attempts[t.id] ? 'zero' : '');
+      return '<a href="' + base + i + '" class="' + cls + (i === n ? ' on' : '') + '"' + (i === n ? ' aria-current="page"' : '') + '>' +
+        '<b>' + String.fromCharCode(65 + i) + '</b><span>' + (st.attempts[t.id] || st.end ? taskPoints(t, passed) : '—') + '</span></a>';
+    }).join('') + '</nav>';
+  }
+
+  function finishExam(ex, st) {
+    if (st.end) return;
+    st.end = Math.min(Date.now(), st.start + examLimit(ex));
+    finishExamRecord(ex, st);
+    location.hash = '#/exam/' + ex.id;
+  }
+
+  function renderExamTask(ex, st, n) {
+    const task = ex.tasks[n];
+    const visible = task.tests.filter(t => !t.hidden);
+    let html = '<header class="top exam-top"><a class="back" href="#/">← Выйти</a>' +
+      '<span class="exam-clock" id="exam-clock" role="timer">' + clock(st.start + examLimit(ex) - Date.now()) + '</span>' +
+      '<button type="button" class="btn small ghost" id="exam-finish">Завершить</button></header>';
+    html += '<main>' + examTabs(ex, st, n, '#/exam/' + ex.id + '/');
+    html += '<article class="task"><h1>' + String.fromCharCode(65 + n) + '. ' + esc(task.title) + '</h1>';
+    html += '<div class="statement">' + paragraphs(task.text) + '</div>';
+    html += examplesHtml(task, visible, task.tests.length - visible.length);
+    html += editorHtml();
+    html += '<div class="actions"><button type="button" class="btn primary" id="run">Отправить решение</button></div>';
+    html += '<p class="kbd-hint">Ctrl + Enter или ⌘ + Enter отправляет решение. Лучшая попытка: ' +
+      (st.best[task.id] || 0) + ' из ' + task.tests.length + ' тестов.</p>';
+    html += '<div id="result" class="result" aria-live="polite"></div>';
+    const prev = n > 0 ? n - 1 : null;
+    const next = n < ex.tasks.length - 1 ? n + 1 : null;
+    html += '<nav class="pager">' + (prev !== null ? '<a href="#/exam/' + ex.id + '/' + prev + '">← Задача ' + String.fromCharCode(65 + prev) + '</a>' : '<span></span>') +
+      (next !== null ? '<a href="#/exam/' + ex.id + '/' + next + '">Задача ' + String.fromCharCode(65 + next) + ' →</a>' : '') + '</nav></article></main>';
+
+    app.innerHTML = html;
+    document.title = clock(st.start + examLimit(ex) - Date.now()) + ' · ' + ex.title;
+
+    const clockEl = document.getElementById('exam-clock');
+    const tick = () => {
+      const left = st.start + examLimit(ex) - Date.now();
+      if (left <= 0) {
+        clearInterval(examTimer);
+        examTimer = null;
+        finishExam(ex, st);
+        return;
+      }
+      clockEl.textContent = clock(left);
+      clockEl.classList.toggle('low', left < 10 * 60000);
+      document.title = clock(left) + ' · ' + ex.title;
+    };
+    tick();
+    examTimer = setInterval(tick, 1000);
+
+    document.getElementById('exam-finish').addEventListener('click', () => {
+      const left = ex.tasks.filter(t => (st.best[t.id] || 0) < t.tests.length).length;
+      if (confirm(left ? 'Не решено полностью: ' + left + ' ' + plural(left, 'задача', 'задачи', 'задач') + '. Завершить экзамен?' : 'Завершить экзамен?')) finishExam(ex, st);
+    });
+
+    const editor = document.getElementById('code');
+    editor.value = st.code[task.id] !== undefined ? st.code[task.id] : task.starter.join('\n');
+    const saveCode = () => { st.code[task.id] = editor.value; save(); };
+    setupEditor(editor, saveCode, () => submit());
+
+    const runBtn = document.getElementById('run');
+    const resultBox = document.getElementById('result');
+    runBtn.addEventListener('click', submit);
+
+    function submit() {
+      if (runBtn.disabled || st.end) return;
+      saveCode();
+      st.attempts[task.id] = (st.attempts[task.id] || 0) + 1;
+      save();
+      resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
+      runBtn.disabled = true;
+      runInWorker(editor.value, task.fn, task.tests).then(res => {
+        runBtn.disabled = false;
+        if (st.end) return; // время вышло во время проверки
+        const failed = failedRunHtml(res, task.fn);
+        if (failed) {
+          resultBox.innerHTML = failed;
+          return;
+        }
+        const passed = res.results.filter(r => r.pass).length;
+        if (passed > (st.best[task.id] || 0)) st.best[task.id] = passed;
+        save();
+        const all = passed === res.results.length;
+        resultBox.innerHTML = '<div class="res ' + (all ? 'res-ok' : 'res-bad') + '"><p class="res-title">' +
+          (all ? 'Принято: все тесты пройдены, 100 баллов' : 'Пройдено ' + passed + ' из ' + res.results.length + ' · ' + taskPoints(task, passed) + ' баллов') + '</p>' +
+          '<ul class="tests">' + res.results.map(r => testItem(r, true)).join('') + '</ul>' + logsBlock(res.logs) +
+          (all && n < ex.tasks.length - 1 ? '<a class="btn primary" href="#/exam/' + ex.id + '/' + (n + 1) + '">Следующая задача</a>' : '') + '</div>';
+        app.querySelector('.exam-tabs').outerHTML = examTabs(ex, st, n, '#/exam/' + ex.id + '/');
+        resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    }
+  }
+
+  function renderExamResult(ex, st) {
+    const score = examScore(ex, st);
+    const max = ex.tasks.length * 100;
+    const minutes = Math.max(1, Math.round((st.end - st.start) / 60000));
+    const full = ex.tasks.filter(t => (st.best[t.id] || 0) === t.tests.length).length;
+    let verdict;
+    if (full >= 5) verdict = 'Отличный результат. На настоящем экзамене с таким уровнем шансы пройти высокие.';
+    else if (full >= 3) verdict = 'Хорошая база. Разбери задачи, где не хватило баллов: обычно это одна идея (префиксные суммы, BFS, бинарный поиск), которую надо один раз понять.';
+    else verdict = 'Пока тяжело, и это нормально для первого раза. Разбери каждую задачу, реши её заново сам и через пару дней пройди экзамен ещё раз.';
+
+    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-meta">Результат</span></header>';
+    html += '<main><article class="lesson"><h1>' + esc(ex.title) + ': ' + score + ' из ' + max + '</h1>';
+    html += '<p class="lead">Полностью решено ' + full + ' из ' + ex.tasks.length + ' за ' + minutes + ' мин. ' + verdict + '</p>';
+    html += '<ol class="row-list">' + ex.tasks.map((t, i) => {
+      const passed = st.best[t.id] || 0;
+      return '<li class="' + (passed === t.tests.length ? 'done' : '') + '"><a class="row" href="#/exam/' + ex.id + '/' + i + '">' +
+        '<span class="row-num">' + String.fromCharCode(65 + i) + '</span><span class="row-title">' + esc(t.title) + '</span>' +
+        '<span class="row-meta">' + taskPoints(t, passed) + ' · ' + (st.attempts[t.id] || 0) + ' ' + plural(st.attempts[t.id] || 0, 'попытка', 'попытки', 'попыток') + '</span></a></li>';
+    }).join('') + '</ol>';
+    html += '<p class="muted small exam-lead">Нажми на задачу, чтобы открыть разбор, подсказки и решение. Свой код там сохранён, его можно доделать.</p>';
+    html += '<div class="actions"><a class="btn primary" href="#/exam/' + ex.id + '/0">Разбор задач</a>' +
+      '<button type="button" class="btn ghost" id="exam-again">Пройти заново</button></div></article></main>';
+    app.innerHTML = html;
+    document.title = 'Результат · ' + ex.title;
+    document.getElementById('exam-again').addEventListener('click', () => {
+      if (!confirm('Начать экзамен заново? Код этой попытки сотрётся, результат останется в истории.')) return;
+      state.exams[ex.id] = { history: st.history || [] };
+      save();
+      renderExamIntro(ex, state.exams[ex.id]);
+    });
+  }
+
+  // Разбор после экзамена: условие, свой код с повторной проверкой, подсказки, решение и объяснение
+  function renderExamReview(ex, st, n) {
+    const task = ex.tasks[n];
+    const visible = task.tests.filter(t => !t.hidden);
+    let html = '<header class="top"><a class="back" href="#/exam/' + ex.id + '">← Результат</a><span class="top-meta">Разбор</span></header>';
+    html += '<main>' + examTabs(ex, st, n, '#/exam/' + ex.id + '/');
+    html += '<article class="task"><h1>' + String.fromCharCode(65 + n) + '. ' + esc(task.title) + '</h1>';
+    html += '<div class="statement">' + paragraphs(task.text) + '</div>';
+    html += examplesHtml(task, visible, task.tests.length - visible.length);
+    html += editorHtml();
+    html += '<div class="actions"><button type="button" class="btn primary" id="run">Проверить</button></div>';
+    html += '<div id="result" class="result" aria-live="polite"></div>';
+    html += '<section class="review"><h2 class="section-h">Подсказки</h2><ol class="hint-list">' + task.hints.map(h => '<li>' + inline(h) + '</li>').join('') + '</ol>' +
+      '<details class="review-sol"><summary>Показать решение и разбор</summary>' + codeBlock(task.solution) + '<p>' + inline(task.explain) + '</p></details></section>';
+    html += '<nav class="pager">' + (n > 0 ? '<a href="#/exam/' + ex.id + '/' + (n - 1) + '">← Задача ' + String.fromCharCode(64 + n) + '</a>' : '<span></span>') +
+      (n < ex.tasks.length - 1 ? '<a href="#/exam/' + ex.id + '/' + (n + 1) + '">Задача ' + String.fromCharCode(66 + n) + ' →</a>' : '<a href="#/exam/' + ex.id + '">К результату →</a>') + '</nav></article></main>';
+    app.innerHTML = html;
+    document.title = 'Разбор: ' + task.title;
+
+    const editor = document.getElementById('code');
+    editor.value = st.code[task.id] !== undefined ? st.code[task.id] : task.starter.join('\n');
+    const saveCode = () => { st.code[task.id] = editor.value; save(); };
+    setupEditor(editor, saveCode, () => check());
+    const runBtn = document.getElementById('run');
+    const resultBox = document.getElementById('result');
+    runBtn.addEventListener('click', check);
+
+    function check() {
+      if (runBtn.disabled) return;
+      saveCode();
+      resultBox.innerHTML = '<p class="muted">Проверяю…</p>';
+      runBtn.disabled = true;
+      runInWorker(editor.value, task.fn, task.tests).then(res => {
+        runBtn.disabled = false;
+        const failed = failedRunHtml(res, task.fn);
+        if (failed) {
+          resultBox.innerHTML = failed;
+          return;
+        }
+        const passed = res.results.filter(r => r.pass).length;
+        const all = passed === res.results.length;
+        resultBox.innerHTML = '<div class="res ' + (all ? 'res-ok' : 'res-bad') + '"><p class="res-title">' +
+          (all ? 'Все тесты пройдены' : 'Пройдено ' + passed + ' из ' + res.results.length) + '</p>' +
+          '<ul class="tests">' + res.results.map(r => testItem(r, false)).join('') + '</ul>' + logsBlock(res.logs) +
+          '<p class="muted small">В разборе результат экзамена уже не меняется.</p></div>';
+      });
+    }
+  }
+
   // ---------- маршруты ----------
 
   function route() {
+    clearInterval(examTimer);
+    examTimer = null;
     const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
     if (parts[0] === 'l' && parts[1]) renderLesson(parts[1]);
     else if (parts[0] === 't' && parts[1] && parts[2]) renderTask(parts[1], parts[2]);
+    else if (parts[0] === 'exam' && parts[1]) renderExam(parts[1], parts[2]);
     else renderHome();
     window.scrollTo(0, 0);
   }
