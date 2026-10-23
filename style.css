@@ -410,3 +410,50 @@ details .code { margin-top: 8px; }
 .review-sol { margin-top: 14px; display: grid; gap: 10px; }
 .review-sol summary { cursor: pointer; color: var(--accent); font-weight: 600; }
 .review-sol[open] summary { margin-bottom: 10px; }
+
+/* план на сегодня */
+.top-links { display: inline-flex; align-items: center; gap: 12px; }
+.ref-btn { border: 0; background: none; padding: 0; color: var(--accent); font-size: 14px; }
+.today {
+  margin-top: 28px;
+  padding: 18px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r);
+  background: var(--surface);
+  display: grid;
+  gap: 12px;
+}
+.today-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.today-head h2 { font-size: 20px; }
+.today-step { font-size: 17px; }
+.today-done { color: var(--ok); font-weight: 600; }
+.today-list { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+.today-list li.done { color: var(--muted); }
+.today-list li.done b::after { content: ' ✓'; color: var(--ok); }
+.today-check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.today-check input { margin-top: 5px; accent-color: var(--accent); }
+.today .btn { justify-self: start; }
+.review-topic { margin-top: 12px; padding: 10px 14px; border-radius: var(--r); background: var(--accent-soft); }
+
+/* справочник поверх задачи */
+.ref-sheet {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(10, 12, 16, .45);
+  display: flex; justify-content: flex-end;
+}
+.ref-panel {
+  width: min(640px, 100%); height: 100%; overflow-y: auto;
+  background: var(--bg);
+  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 32px);
+  display: grid; gap: 12px; align-content: start;
+}
+.ref-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.ref-head h2 { font-size: 22px; }
+.ref-sec { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); padding: 12px 14px; }
+.ref-sec summary { cursor: pointer; font-weight: 600; }
+.ref-sec[open] summary { margin-bottom: 12px; }
+.brand { white-space: nowrap; }
+@media (max-width: 420px) {
+  .top-links { gap: 10px; }
+  .top-links .top-link { display: none; }
+}

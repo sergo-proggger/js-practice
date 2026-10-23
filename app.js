@@ -21,7 +21,7 @@
   // ---------- прогресс ----------
 
   function loadState() {
-    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {}, exams: {} };
+    const base = { solved: {}, attempts: {}, code: {}, hints: {}, days: {}, quiz: {}, exams: {}, plan: {} };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
       if (saved && typeof saved === 'object') {
@@ -303,6 +303,148 @@
     visible.map(t => '<li><code>' + esc(callLabel(task, t)) + '</code><span class="ex-res"><span class="muted">→</span><code>' + esc('expectedError' in t ? 'ошибка ' + window.jspShow(t.expectedError) : window.jspShow(t.expected)) + '</code></span></li>').join('') +
     '</ul>' + (hiddenCount ? '<p class="muted small">И ещё ' + hiddenCount + ' ' + plural(hiddenCount, 'скрытый тест', 'скрытых теста', 'скрытых тестов') + ' на крайние случаи.</p>' : '') + '</div>';
 
+  // ---------- справочник ----------
+
+  const refButton = () => (COURSE.reference ? '<button type="button" class="top-link ref-btn" data-ref>Справочник</button>' : '');
+
+  function referenceHtml() {
+    return COURSE.reference.map((sec, i) => '<details class="ref-sec"' + (i < 2 ? ' open' : '') + '><summary>' + esc(sec.title) + '</summary>' +
+      '<div class="theory">' + sec.blocks.map(renderBlock).join('') + '</div></details>').join('');
+  }
+
+  // Справочник поверх задачи: код в редакторе и таймер экзамена не теряются
+  function openReference() {
+    if (document.querySelector('.ref-sheet')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'ref-sheet';
+    wrap.innerHTML = '<div class="ref-panel" role="dialog" aria-modal="true" aria-label="Справочник">' +
+      '<div class="ref-head"><h2>Справочник</h2><button type="button" class="btn small ghost" data-ref-close>Закрыть</button></div>' +
+      '<p class="muted small">Приёмы и синтаксис, как документация. Готовых решений задач здесь нет.</p>' + referenceHtml() + '</div>';
+    const close = () => {
+      wrap.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    wrap.addEventListener('click', e => {
+      if (e.target === wrap || e.target.closest('[data-ref-close]')) close();
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-ref-close]').focus();
+  }
+
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-ref]')) openReference();
+  });
+
+  // ---------- план по дням ----------
+
+  function stepDate(step) {
+    if (step.lesson) {
+      const lesson = COURSE.lessons[step.lesson];
+      if (!lesson || !lesson.tasks.every(t => state.solved[key(step.lesson, t.id)])) return null;
+      return lesson.tasks.map(t => state.solved[key(step.lesson, t.id)]).sort().pop();
+    }
+    if (step.exam) {
+      const st = state.exams[step.exam];
+      return st && st.history && st.history.length ? st.history[st.history.length - 1].date : null;
+    }
+    return state.plan['done:' + step.id] || null;
+  }
+
+  function stepTitle(step) {
+    if (step.lesson) return COURSE.lessons[step.lesson].title;
+    if (step.exam) return findExam(step.exam).title;
+    return step.title;
+  }
+
+  function renderToday() {
+    const plan = COURSE.plan;
+    if (!plan) return '';
+    const steps = plan.steps.filter(s => (s.lesson ? COURSE.lessons[s.lesson] : s.exam || s.review ? findExam(s.exam || s.review) : true));
+    const today = dateKey(new Date());
+    const idx = steps.findIndex(s => !stepDate(s));
+    const doneToday = steps.filter(s => stepDate(s) === today);
+    let html = '<section class="today"><div class="today-head"><h2>Сегодня</h2>' +
+      '<span class="muted small">' + steps.filter(s => stepDate(s)).length + ' из ' + steps.length + ' шагов плана</span></div>';
+
+    if (idx === -1) {
+      return html + '<p>План до экзамена пройден целиком. Перед отбором пройди один пробный экзамен ещё раз и полистай справочник. Удачи!</p></section>';
+    }
+    const step = steps[idx];
+
+    // Шаг на сегодня уже сделан: хвалим и показываем завтрашний, но даём взять его сразу
+    if (doneToday.length && state.plan.ahead !== today) {
+      const left = goalDaysLeft();
+      const behind = left !== null && steps.length - idx > left;
+      html += '<p class="today-done">Сегодня пройдено: ' + doneToday.map(s => esc(stepTitle(s))).join(', ') + ' ✓</p>' +
+        '<p>Завтра: <b>' + esc(stepTitle(step)) + '</b>. Отдохни, мозгу нужно время, чтобы всё улеглось.</p>' +
+        (behind ? '<p class="muted small">До экзамена ' + left + ' ' + plural(left, 'день', 'дня', 'дней') + ', а шагов осталось ' + (steps.length - idx) + '. Если есть силы, возьми следующий шаг сегодня.</p>' : '') +
+        '<div class="actions"><button type="button" class="btn ghost small" id="plan-ahead">Взять следующий шаг сейчас</button></div></section>';
+      return html;
+    }
+
+    html += '<p class="today-step">День ' + (idx + 1) + ' из ' + steps.length + ': <b>' + esc(stepTitle(step)) + '</b></p><ol class="today-list">';
+    if (step.lesson) {
+      const prev = steps[idx - 1];
+      if (prev && prev.lesson) {
+        const pl = COURSE.lessons[prev.lesson];
+        const warmTask = pl.tasks[pl.tasks.length - 1];
+        const warmKey = 'warm:' + step.id;
+        html += '<li class="' + (state.plan[warmKey] ? 'done' : '') + '"><label class="today-check"><input type="checkbox" data-warm="' + warmKey + '"' + (state.plan[warmKey] ? ' checked' : '') + '>' +
+          '<span><b>Разминка, 10 минут.</b> Сотри код и реши заново <a href="#/t/' + prev.lesson + '/' + warmTask.id + '">«' + esc(warmTask.title) + '»</a> из прошлого урока, без подсказок. Так вчерашнее закрепится.</span></label></li>';
+      }
+      const lesson = COURSE.lessons[step.lesson];
+      const quizDone = (lesson.quiz || []).every((q, i) => state.quiz[step.lesson + '#' + i] !== undefined);
+      const p = lessonProgress(step.lesson);
+      const firstOpen = lesson.tasks.find(t => !state.solved[key(step.lesson, t.id)]);
+      html += '<li class="' + (quizDone ? 'done' : '') + '"><span><b>Теория, 20–30 минут.</b> Прочитай <a href="#/l/' + step.lesson + '">урок</a> не спеша, примеры кода разбери строчка за строчкой. В конце ответь на вопросы «Проверь себя».</span></li>';
+      html += '<li class="' + (p.done === p.total ? 'done' : '') + '"><span><b>Задачи: ' + p.done + ' из ' + p.total + '.</b> Решай по порядку, они от простой к сложной. Застрял на 15 минут: возьми подсказку или открой справочник. ' +
+        (firstOpen ? '<a href="#/t/' + step.lesson + '/' + firstOpen.id + '">Следующая: «' + esc(firstOpen.title) + '»</a>' : '') + '</span></li>';
+      html += '<li><span><b>Закрепи.</b> Когда все задачи решены, скажи себе вслух в двух фразах: что это за приём и по какому признаку в условии его узнать. Сверься с таблицей в справочнике.</span></li>';
+      html += '</ol><a class="btn primary" href="' + (quizDone ? '#/t/' + step.lesson + '/' + (firstOpen ? firstOpen.id : lesson.tasks[0].id) : '#/l/' + step.lesson) + '">' + (quizDone ? 'К задачам' : 'Начать урок') + '</a>';
+    } else if (step.exam) {
+      const ex = findExam(step.exam);
+      html += '<li><span>Выдели ' + Math.round(ex.minutes / 60 * 10) / 10 + ' часа подряд, когда никто не отвлечёт. Телефон в беззвучный.</span></li>' +
+        '<li><span>Начни с задач A и B, они самые простые. Застрял — переходи к следующей и возвращайся потом.</span></li>' +
+        '<li><span>Справочником пользоваться можно, готовые ответы искать нельзя.</span></li></ol>' +
+        '<a class="btn primary" href="#/exam/' + ex.id + '">Перейти к экзамену</a>';
+    } else {
+      html += '<li><span>' + inline(step.text) + '</span></li></ol>' +
+        '<div class="actions"><a class="btn" href="#/exam/' + step.review + '">Открыть результат и разбор</a>' +
+        '<button type="button" class="btn primary" id="plan-review-done">Готово, ошибки разобраны</button></div>';
+    }
+    return html + '</section>';
+  }
+
+  function goalDaysLeft() {
+    if (!COURSE.goal) return null;
+    const [y, m, d] = COURSE.goal.examStart.split('-').map(Number);
+    const today0 = new Date();
+    today0.setHours(0, 0, 0, 0);
+    return Math.round((new Date(y, m - 1, d) - today0) / 86400000);
+  }
+
+  function bindToday() {
+    const ahead = document.getElementById('plan-ahead');
+    if (ahead) ahead.addEventListener('click', () => { state.plan.ahead = dateKey(new Date()); save(); renderHome(); });
+    const reviewDone = document.getElementById('plan-review-done');
+    if (reviewDone) {
+      reviewDone.addEventListener('click', () => {
+        const step = COURSE.plan.steps.find(s => s.review && !state.plan['done:' + s.id]);
+        if (step) state.plan['done:' + step.id] = dateKey(new Date());
+        state.days[dateKey(new Date())] = true;
+        save();
+        renderHome();
+      });
+    }
+    app.querySelectorAll('[data-warm]').forEach(box => box.addEventListener('change', () => {
+      state.plan[box.dataset.warm] = box.checked;
+      save();
+      box.closest('li').classList.toggle('done', box.checked);
+    }));
+  }
+
   // ---------- главная ----------
 
   function renderHome() {
@@ -318,7 +460,7 @@
     const next = nextUnsolved();
 
     let html = '<header class="top"><a class="brand" href="#/">JS-практика</a>' +
-      '<a class="top-link" href="' + TRAINER_URL + '">Тренажёр по теории</a></header><main>';
+      '<span class="top-links">' + refButton() + '<a class="top-link" href="' + TRAINER_URL + '">Тренажёр по теории</a></span></header><main>';
 
     html += '<section class="intro"><h1>JavaScript с нуля до задач Яндекс Контеста</h1>' +
       '<p class="lead">В каждом уроке теория с примерами, вопросы для самопроверки и задачи. Код проверяют тесты, часть из них скрыта, как на контесте. Если застрял, возьми подсказку.</p>' +
@@ -334,6 +476,7 @@
       html += '<p>Все задачи открытых уроков решены. Новые уроки появятся по плану.</p>';
     }
     html += '</section>';
+    html += renderToday();
 
     if (COURSE.goal) {
       const g = COURSE.goal;
@@ -387,6 +530,7 @@
 
     app.innerHTML = html;
     document.title = 'JS-практика';
+    bindToday();
   }
 
   // ---------- урок ----------
@@ -417,7 +561,7 @@
     const list = allLessons();
     const idx = list.indexOf(lid);
 
-    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-meta">Урок ' + (idx + 1) + ' из ' + list.length + '</span></header>';
+    let html = '<header class="top"><a class="back" href="#/">← Все уроки</a><span class="top-links">' + refButton() + '<span class="top-meta">Урок ' + (idx + 1) + ' из ' + list.length + '</span></span></header>';
     html += '<main><article class="lesson"><h1>' + esc(lesson.title) + '</h1>';
     html += '<div class="theory">' + lesson.theory.map(renderBlock).join('') + '</div>';
 
@@ -485,7 +629,7 @@
     const nextLabel = nextTask ? 'Следующая задача' : nextLesson ? 'Следующий урок' : 'К списку уроков';
 
     let html = '<header class="top"><a class="back" href="#/l/' + lid + '">← ' + esc(lesson.title) + '</a>' +
-      '<span class="top-meta">Задача ' + (tIndex + 1) + ' из ' + lesson.tasks.length + '</span></header>';
+      '<span class="top-links">' + refButton() + '<span class="top-meta">Задача ' + (tIndex + 1) + ' из ' + lesson.tasks.length + '</span></span></header>';
     html += '<main><article class="task"><h1 id="task-title">' + esc(task.title) + (state.solved[k] ? '<span class="badge">решена</span>' : '') + '</h1>';
     html += '<div class="statement">' + paragraphs(task.text) + '</div>';
     html += examplesHtml(task, visible, hiddenCount);
@@ -663,6 +807,7 @@
     html += '<p>' + ex.tasks.length + ' задач от простой к сложной и ' + ex.minutes + ' минут на всё. Решать можно в любом порядке и отправлять сколько угодно раз, засчитывается лучшая попытка.</p>';
     html += '<ul class="t-list">' +
       '<li>Подсказок и готовых решений во время экзамена нет. Разбор каждой задачи откроется после завершения.</li>' +
+      '<li>Справочником пользоваться можно, как документацией: там приёмы и синтаксис, но не ответы.</li>' +
       '<li>У скрытых тестов видно только «пройден» или «неверный ответ», без входных данных, как на контесте.</li>' +
       '<li>За задачу до 100 баллов: доля пройденных тестов. Медленное решение не успевает за 2 секунды на больших данных и теряет баллы.</li>' +
       '<li>Таймер идёт, даже если закрыть приложение. Решай честно, без поиска ответов: так экзамен покажет реальный уровень.</li>' +
@@ -706,7 +851,7 @@
     const visible = task.tests.filter(t => !t.hidden);
     let html = '<header class="top exam-top"><a class="back" href="#/">← Выйти</a>' +
       '<span class="exam-clock" id="exam-clock" role="timer">' + clock(st.start + examLimit(ex) - Date.now()) + '</span>' +
-      '<button type="button" class="btn small ghost" id="exam-finish">Завершить</button></header>';
+      '<span class="top-links">' + refButton() + '<button type="button" class="btn small ghost" id="exam-finish">Завершить</button></span></header>';
     html += '<main>' + examTabs(ex, st, n, '#/exam/' + ex.id + '/');
     html += '<article class="task"><h1>' + String.fromCharCode(65 + n) + '. ' + esc(task.title) + '</h1>';
     html += '<div class="statement">' + paragraphs(task.text) + '</div>';
@@ -819,7 +964,7 @@
   function renderExamReview(ex, st, n) {
     const task = ex.tasks[n];
     const visible = task.tests.filter(t => !t.hidden);
-    let html = '<header class="top"><a class="back" href="#/exam/' + ex.id + '">← Результат</a><span class="top-meta">Разбор</span></header>';
+    let html = '<header class="top"><a class="back" href="#/exam/' + ex.id + '">← Результат</a><span class="top-links">' + refButton() + '<span class="top-meta">Разбор</span></span></header>';
     html += '<main>' + examTabs(ex, st, n, '#/exam/' + ex.id + '/');
     html += '<article class="task"><h1>' + String.fromCharCode(65 + n) + '. ' + esc(task.title) + '</h1>';
     html += '<div class="statement">' + paragraphs(task.text) + '</div>';
@@ -827,6 +972,8 @@
     html += editorHtml();
     html += '<div class="actions"><button type="button" class="btn primary" id="run">Проверить</button></div>';
     html += '<div id="result" class="result" aria-live="polite"></div>';
+    const topic = COURSE.examTopics && COURSE.examTopics[ex.id + '/' + task.id];
+    if (topic && COURSE.lessons[topic]) html += '<p class="review-topic">Теория к задаче: <a href="#/l/' + topic + '">' + esc(COURSE.lessons[topic].title) + '</a></p>';
     html += '<section class="review"><h2 class="section-h">Подсказки</h2><ol class="hint-list">' + task.hints.map(h => '<li>' + inline(h) + '</li>').join('') + '</ol>' +
       '<details class="review-sol"><summary>Показать решение и разбор</summary>' + codeBlock(task.solution) + '<p>' + inline(task.explain) + '</p></details></section>';
     html += '<nav class="pager">' + (n > 0 ? '<a href="#/exam/' + ex.id + '/' + (n - 1) + '">← Задача ' + String.fromCharCode(64 + n) + '</a>' : '<span></span>') +
